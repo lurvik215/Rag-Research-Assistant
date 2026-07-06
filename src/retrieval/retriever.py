@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 import torch
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -11,16 +14,21 @@ class Retriever:
         self.client = chromadb.PersistentClient(path=CHROMA_DIR)
         self.collection = self.client.get_collection("research_papers")
 
-    def retrieve(self, question: str, top_k: int = TOP_K) -> list[dict]:
+    def retrieve(self, question: str, top_k: int = TOP_K,
+                 paper_filter: str = None) -> list[dict]:
         """
         Embeds the question and finds the most similar chunks in ChromaDB.
         Returns list of {text, source_file, page_num, distance}
         """
         query_vector = self.model.encode([question]).tolist()
 
+        # Build optional filter
+        where = {"source_file": paper_filter} if paper_filter else None
+
         results = self.collection.query(
             query_embeddings=query_vector,
             n_results=top_k,
+            where = where,
             include=["documents", "metadatas", "distances"]
         )
 

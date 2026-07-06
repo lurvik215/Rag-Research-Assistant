@@ -7,13 +7,15 @@ from src.ingestion.pdf_loader import PDFLoader
 from src.ingestion.chunker import Chunker
 from src.ingestion.embedder import Embedder
 from src.retrieval.retriever import Retriever
+from src.generation.llm_runner import LLMRunner
+from src.generation.prompt_builder import build_prompt
 
 # Initialise components once — reused across all calls
 loader = PDFLoader()
 chunker = Chunker()
 embedder = Embedder()
 retriever = Retriever()
-
+llm = LLMRunner()
 
 def ingest(pdf_path: str) -> int:
     """
@@ -43,6 +45,38 @@ def ingest(pdf_path: str) -> int:
 
     return stored
 
+def query(question: str, paper_filter: str = None) -> dict:
+    """
+    Full RAG query pipeline: question → retrieve → prompt → LLM → answer.
+    paper_filter: optionally restrict search to one paper by filename.
+    Returns {answer, sources}
+    """
+    # Retrieve relevant chunks
+    chunks = retriever.retrieve(question, paper_filter=paper_filter)
+
+    if not chunks:
+        return {
+            "answer": "I could not find any relevant content in the uploaded papers.",
+            "sources": []
+        }
+
+    # Build grounded prompt
+    prompt = build_prompt(question, chunks)
+
+    # Generate answer
+    answer = llm.generate(prompt)
+
+    # Format sources for UI display
+    sources = [
+        {
+            "file": c["source_file"],
+            "page": c["page_num"],
+            "snippet": c["text"][:200]
+        }
+        for c in chunks
+    ]
+
+    return {"answer": answer, "sources": sources}
 
 def get_indexed_papers() -> list[str]:
     """
