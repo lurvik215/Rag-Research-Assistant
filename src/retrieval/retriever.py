@@ -1,34 +1,26 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-import torch
-import chromadb
-from sentence_transformers import SentenceTransformer
-from config import EMBED_MODEL, CHROMA_DIR, TOP_K
+from config import TOP_K
 
 
 class Retriever:
-    def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = SentenceTransformer(EMBED_MODEL, device=self.device)
-        self.client = chromadb.PersistentClient(path=CHROMA_DIR)
-        self.collection = self.client.get_collection("research_papers")
+    def __init__(self, collection, embed_model):
+        self.collection = collection
+        self.model = embed_model
 
     def retrieve(self, question: str, top_k: int = TOP_K,
                  paper_filter: str = None) -> list[dict]:
-        """
-        Embeds the question and finds the most similar chunks in ChromaDB.
-        Returns list of {text, source_file, page_num, distance}
-        """
-        query_vector = self.model.encode([question]).tolist()
+        if self.collection.count() == 0:
+            return []
 
-        # Build optional filter
+        query_vector = self.model.encode([question]).tolist()
         where = {"source_file": paper_filter} if paper_filter else None
 
         results = self.collection.query(
             query_embeddings=query_vector,
-            n_results=top_k,
-            where = where,
+            n_results=min(top_k, self.collection.count()),
+            where=where,
             include=["documents", "metadatas", "distances"]
         )
 

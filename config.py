@@ -20,7 +20,3 @@ CHUNK_OVERLAP = 50
 # Retrieval
 TOP_K = 5
 
-# Storage paths
-CHROMA_DIR = "./vectorstore"
-DATA_RAW = "./data/raw"
-DATA_PROCESSED = "./data/processed"

@@ -2,7 +2,11 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os
-import pathlib
+import torch
+import chromadb
+from sentence_transformers import SentenceTransformer
+from config import EMBED_MODEL
+
 from src.ingestion.pdf_loader import PDFLoader
 from src.ingestion.chunker import Chunker
 from src.ingestion.embedder import Embedder
@@ -10,38 +14,47 @@ from src.retrieval.retriever import Retriever
 from src.generation.llm_runner import LLMRunner
 from src.generation.prompt_builder import build_prompt
 
-# Initialise components once — reused across all calls
-loader = PDFLoader()
-chunker = Chunker()
-embedder = Embedder()
-retriever = Retriever()
-llm = LLMRunner()
+# ── In-memory ChromaDB — resets when app restarts ─────────────
+_chroma_client = chromadb.EphemeralClient()
+_collection = _chroma_client.get_or_create_collection(
+    name="research_papers",
+    metadata={"hnsw:space": "cosine"}
+)
+
+# ── Shared embedding model — loaded once ───────────────────────
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+_embed_model = SentenceTransformer(EMBED_MODEL, device=_device)
+
+# ── Shared components ──────────────────────────────────────────
+_loader = PDFLoader()
+_chunker = Chunker()
+_embedder = Embedder(_collection)
+_embedder.model = _embed_model          # reuse same model instance
+_retriever = Retriever(_collection, _embed_model)
+_llm = LLMRunner()
+
+# Track ingested papers in memory
+_ingested_papers: set = set()
 
 def ingest(pdf_path: str) -> int:
     """
-    Full ingestion pipeline: PDF → chunks → vectors → ChromaDB.
-    Returns number of chunks stored.
-    Skips ingestion if paper is already indexed.
+    Ingests a PDF into in-memory ChromaDB.
+    Skips if already ingested this session.
     """
     source_file = os.path.basename(pdf_path)
 
-    # Check if already ingested — avoid duplicates
-    existing = embedder.collection.get(
-        where={"source_file": source_file},
-        limit=1
-    )
-    if existing["ids"]:
-        print(f"'{source_file}' already indexed — skipping.")
+    if source_file in _ingested_papers:
         return 0
 
     # Run the pipeline
-    pages = loader.load(pdf_path)
+    pages = _loader.load(pdf_path)
     if not pages:
         print(f"No text extracted from '{source_file}'. Skipping.")
         return 0
 
-    chunks = chunker.chunk(pages)
-    stored = embedder.store(chunks)
+    chunks = _chunker.chunk(pages)
+    stored = _embedder.store(chunks)
+    _ingested_papers.add(source_file)
 
     return stored
 
@@ -52,11 +65,11 @@ def query(question: str, paper_filter: str = None) -> dict:
     Returns {answer, sources}
     """
     # Retrieve relevant chunks
-    chunks = retriever.retrieve(question, paper_filter=paper_filter)
+    chunks = _retriever.retrieve(question, paper_filter=paper_filter)
 
     if not chunks:
         return {
-            "answer": "I could not find any relevant content in the uploaded papers.",
+            "answer": "No relevant content found in the uploaded papers.",
             "sources": []
         }
 
@@ -64,7 +77,7 @@ def query(question: str, paper_filter: str = None) -> dict:
     prompt = build_prompt(question, chunks)
 
     # Generate answer
-    answer = llm.generate(prompt)
+    answer = _llm.generate(prompt)
 
     # Format sources for UI display
     sources = [
@@ -80,8 +93,6 @@ def query(question: str, paper_filter: str = None) -> dict:
 
 def get_indexed_papers() -> list[str]:
     """
-    Returns list of unique paper names currently stored in ChromaDB.
+    Returns papers ingested in this session.
     """
-    results = embedder.collection.get(include=["metadatas"])
-    papers = list({m["source_file"] for m in results["metadatas"]})
-    return sorted(papers)
+    return sorted(list(_ingested_papers))
