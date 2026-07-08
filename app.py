@@ -403,21 +403,27 @@ if user_input := st.chat_input(placeholder):
     # Generate answer
     with st.chat_message("assistant"):
         with st.spinner(f"Searching {len(paper_filter)} paper(s)..."):
-            result = query(
-                user_input,
-                paper_filter=paper_filter,
-                model=st.session_state.get("groq_model",
-                                           "llama-3.3-70b-versatile")
-            )
+            try:
+                result = query(
+                    user_input,
+                    paper_filter=paper_filter,
+                    model=st.session_state.get("groq_model",
+                                               "llama-3.3-70b-versatile")
+                )
+            except Exception as e:
+                st.error(f"Error generating answer: {str(e)}")
+                active["messages"].append({
+                    "role": "assistant",
+                    "content": f"Error: {str(e)}",
+                    "sources": []
+                })
+                st.stop()
 
         st.markdown(result["answer"])
-
         if result["sources"]:
-            # Show which papers were cited
             cited = list({s["file"] for s in result["sources"]})
             if len(cited) > 1:
                 st.caption(f"Sources pulled from: {', '.join(cited)}")
-
             with st.expander("📚 View sources"):
                 for s in result["sources"]:
                     st.markdown(f"**{s['file']}** — Page {s['page']}")
