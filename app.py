@@ -3,8 +3,6 @@ warnings.filterwarnings("ignore")
 
 import streamlit as st
 import os
-import tempfile
-import shutil
 import time
 
 st.set_page_config(
@@ -14,23 +12,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ── Custom CSS — ChatGPT-style interface ──────────────────────
+# ── CSS ───────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Hide default Streamlit header and footer */
 #MainMenu, footer, header {visibility: hidden;}
-
-/* Main background */
 .stApp { background-color: #212121; }
-
-/* Sidebar styling */
 [data-testid="stSidebar"] {
     background-color: #171717;
     border-right: 1px solid #2f2f2f;
 }
 [data-testid="stSidebar"] * { color: #ececec !important; }
-
-/* Sidebar buttons — chat sessions */
 .stButton > button {
     background: transparent;
     border: none;
@@ -43,76 +34,32 @@ st.markdown("""
     transition: background 0.15s;
 }
 .stButton > button:hover { background: #2a2a2a !important; }
-
-/* Active session button */
-.stButton > button:focus {
-    background: #2f2f2f !important;
-    box-shadow: none !important;
-}
-
-/* New Chat button */
-div[data-testid="stSidebarNav"] { display: none; }
-
-/* Chat messages area */
-.stChatMessage {
-    background: transparent !important;
-    border: none !important;
-    padding: 12px 0 !important;
-}
-
-/* User message bubble */
+.stChatMessage { background: transparent !important; border: none !important; }
 [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
     background: #2f2f2f !important;
     border-radius: 12px !important;
     padding: 12px 16px !important;
-    margin: 4px 0 !important;
 }
-
-/* Assistant message */
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
-    background: transparent !important;
-    padding: 12px 4px !important;
-}
-
-/* Chat input box */
 [data-testid="stChatInput"] {
     background: #2f2f2f !important;
     border: 1px solid #3f3f3f !important;
     border-radius: 16px !important;
-    color: #ececec !important;
 }
-
-/* Expander (sources) */
 [data-testid="stExpander"] {
     background: #1a1a1a !important;
     border: 1px solid #2f2f2f !important;
     border-radius: 8px !important;
 }
-
-/* Status box */
-[data-testid="stStatusWidget"] { background: #2a2a2a !important; }
-
-/* Upload area */
 [data-testid="stFileUploader"] {
     background: #1e1e1e !important;
     border: 1px dashed #3f3f3f !important;
     border-radius: 10px !important;
-    padding: 8px !important;
 }
-
-/* Success / info messages */
-[data-testid="stAlert"] { border-radius: 8px !important; }
-
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: #171717; }
 ::-webkit-scrollbar-thumb { background: #3f3f3f; border-radius: 3px; }
-
-/* Text colors */
 p, span, label, div { color: #ececec; }
 code { background: #2a2a2a !important; color: #a8d8a8 !important; }
-
-/* Sidebar section labels */
 .sidebar-label {
     font-size: 11px;
     font-weight: 600;
@@ -125,206 +72,289 @@ code { background: #2a2a2a !important; color: #a8d8a8 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Import pipeline ───────────────────────────────────────────
 from src.rag_pipeline import ingest, query, get_indexed_papers
 
-# ── Session state initialisation ──────────────────────────────
-if "sessions" not in st.session_state:
-    # Each session: {id, title, messages, paper}
-    st.session_state.sessions = []
+def ensure_papers_ingested(papers: list):
+    """
+    Ensures papers are in ChromaDB.
+    Forces re-ingest if chunks are missing from DB.
+    """
+    from src.rag_pipeline import _ingested_papers, _collection
+    for paper in papers:
+        path = f"/tmp/{paper}"
+        if not os.path.exists(path):
+            continue
+        # Check if actually in ChromaDB
+        try:
+            result = _collection.get(
+                where={"source_file": paper}, limit=1
+            )
+            if not result["ids"]:
+                # Chunks missing — force re-ingest
+                _ingested_papers.discard(paper)
+                ingest(path)
+        except Exception:
+            _ingested_papers.discard(paper)
+            ingest(path)
 
+# ── Session state ─────────────────────────────────────────────
+if "sessions" not in st.session_state:
+    st.session_state.sessions = []
 if "active_session" not in st.session_state:
     st.session_state.active_session = None
-
 if "session_counter" not in st.session_state:
     st.session_state.session_counter = 0
 
 
 def create_new_session():
     st.session_state.session_counter += 1
-    session_id = st.session_state.session_counter
-    new_session = {
-        "id": session_id,
-        "title": f"Chat {session_id}",
+    sid = st.session_state.session_counter
+    st.session_state.sessions.append({
+        "id": sid,
+        "title": f"Chat {sid}",
         "messages": [],
-        "paper": None
-    }
-    st.session_state.sessions.append(new_session)
-    st.session_state.active_session = session_id
+        "papers": []          # list of paper filenames
+    })
+    st.session_state.active_session = sid
 
 
-def get_active_session():
+def get_active():
     for s in st.session_state.sessions:
         if s["id"] == st.session_state.active_session:
             return s
     return None
 
 
-def update_session_title(session_id, title):
+def update_title(sid, title):
     for s in st.session_state.sessions:
-        if s["id"] == session_id:
-            s["title"] = title[:30]
+        if s["id"] == sid:
+            s["title"] = title[:32]
             break
 
 
-# Create first session if none exists
 if not st.session_state.sessions:
     create_new_session()
 
 # ── SIDEBAR ───────────────────────────────────────────────────
 with st.sidebar:
-    # App title
     st.markdown("""
-    <div style='padding: 8px 4px 16px; display:flex; align-items:center; gap:10px'>
+    <div style='padding:8px 4px 16px;display:flex;align-items:center;gap:10px'>
         <span style='font-size:20px'>📄</span>
-        <span style='font-size:16px; font-weight:600; color:#ececec'>Research Assistant</span>
-    </div>
-    """, unsafe_allow_html=True)
+        <span style='font-size:16px;font-weight:600;color:#ececec'>Research Assistant</span>
+    </div>""", unsafe_allow_html=True)
 
-    # New Chat button
-    if st.button("✏️  New Chat", use_container_width=True, key="new_chat_btn"):
+    if st.button("✏️  New Chat", use_container_width=True, key="new_chat"):
         create_new_session()
         st.rerun()
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-    # Chat history list
-    st.markdown("<div class='sidebar-label'>Your chats</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sidebar-label'>Your chats</div>",
+                unsafe_allow_html=True)
 
     for session in reversed(st.session_state.sessions):
         is_active = session["id"] == st.session_state.active_session
-        paper_icon = "📄 " if session["paper"] else "💬 "
-        label = paper_icon + session["title"]
+        n_papers = len(session["papers"])
+        icon = f"📚 " if n_papers > 1 else "📄 " if n_papers == 1 else "💬 "
+        label = icon + session["title"]
 
         if is_active:
             st.markdown(f"""
-            <div style='background:#2f2f2f; border-radius:8px; padding:8px 12px;
-                        font-size:13px; color:#ececec; margin-bottom:4px;
-                        border-left: 3px solid #10a37f'>
+            <div style='background:#2f2f2f;border-radius:8px;padding:8px 12px;
+                        font-size:13px;color:#ececec;margin-bottom:4px;
+                        border-left:3px solid #10a37f'>
                 {label}
             </div>""", unsafe_allow_html=True)
         else:
-            if st.button(label, key=f"sess_{session['id']}", use_container_width=True):
+            if st.button(label, key=f"sess_{session['id']}",
+                         use_container_width=True):
                 st.session_state.active_session = session["id"]
                 st.rerun()
 
     st.markdown("---")
 
-    # Active session controls
-    active = get_active_session()
+    active = get_active()
     if active:
         st.markdown("<div class='sidebar-label'>This chat</div>",
                     unsafe_allow_html=True)
 
-        # Paper status
-        if active["paper"]:
-            st.markdown(f"""
-            <div style='background:#1a2e1a; border:1px solid #2d4a2d;
-                        border-radius:8px; padding:8px 12px; margin-bottom:8px'>
-                <div style='font-size:11px; color:#8e8ea0; margin-bottom:2px'>Uploaded paper</div>
-                <div style='font-size:12px; color:#a8d8a8'>📄 {active["paper"]}</div>
-            </div>""", unsafe_allow_html=True)
-        else:
+        # ── Uploaded papers list ──────────────────────────────
+        if active["papers"]:
             st.markdown("""
-            <div style='background:#1e1e1e; border:1px solid #2f2f2f;
-                        border-radius:8px; padding:8px 12px; margin-bottom:8px'>
-                <div style='font-size:12px; color:#8e8ea0'>No paper uploaded yet</div>
+            <div style='background:#1a2e1a;border:1px solid #2d4a2d;
+                        border-radius:8px;padding:8px 12px;margin-bottom:8px'>
+            <div style='font-size:11px;color:#8e8ea0;margin-bottom:6px'>
+                Uploaded papers
             </div>""", unsafe_allow_html=True)
 
-        # Upload PDF
-        uploaded_file = st.file_uploader(
-            "Upload a PDF",
+            for paper in list(active["papers"]):
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    st.markdown(
+                        f"<div style='font-size:12px;color:#a8d8a8;"
+                        f"padding:3px 0'>📄 {paper}</div>",
+                        unsafe_allow_html=True)
+                with c2:
+                    if st.button("✕", key=f"rm_{paper}_{active['id']}",
+                                 help=f"Remove {paper}"):
+                        active["papers"].remove(paper)
+                        st.rerun()
+
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style='background:#1e1e1e;border:1px solid #2f2f2f;
+                        border-radius:8px;padding:8px 12px;margin-bottom:8px'>
+            <div style='font-size:12px;color:#8e8ea0'>No papers uploaded yet</div>
+            </div>""", unsafe_allow_html=True)
+
+        # ── Multi-file uploader ───────────────────────────────
+        uploaded_files = st.file_uploader(
+            "Upload PDFs (select multiple)",
             type="pdf",
+            accept_multiple_files=True,
             key=f"upload_{active['id']}"
         )
 
-        if uploaded_file is not None:
-            clean_path = f"/tmp/{uploaded_file.name}"
-            with open(clean_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-
-            with st.status(f"Indexing {uploaded_file.name}..."):
-                n = ingest(clean_path)
-
-            if n > 0:
-                active["paper"] = uploaded_file.name
-                update_session_title(active["id"], uploaded_file.name.replace(".pdf", ""))
-                st.success(f"Indexed {n} chunks!")
+        if uploaded_files:
+            newly_added = False
+            for uf in uploaded_files:
+                if uf.name not in active["papers"]:
+                    clean_path = f"/tmp/{uf.name}"
+                    with open(clean_path, "wb") as f:
+                        f.write(uf.getbuffer())
+                    with st.status(f"Indexing {uf.name}..."):
+                        n = ingest(clean_path)
+                    if n > 0:
+                        active["papers"].append(uf.name)
+                        if len(active["papers"]) == 1:
+                            update_title(active["id"],
+                                         uf.name.replace(".pdf", ""))
+                        st.success(f"✓ {uf.name} — {n} chunks")
+                        newly_added = True
+                    else:
+                        if uf.name not in active["papers"]:
+                            active["papers"].append(uf.name)
+                            newly_added = True
+                        st.info(f"{uf.name} already indexed")
+            if newly_added:
                 st.rerun()
-            else:
-                active["paper"] = uploaded_file.name
-                st.info("Already indexed this session.")
 
-        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-
-        # Search scope
-        if active["paper"]:
+        # ── Search scope ──────────────────────────────────────
+        if active["papers"]:
+            st.markdown("<div style='height:6px'></div>",
+                        unsafe_allow_html=True)
             scope = st.radio(
                 "Search in",
-                ["This paper only", "All uploaded papers"],
+                ["All uploaded papers", "Select specific papers"],
                 key=f"scope_{active['id']}"
             )
-        
-        # Clear chat button
+
+            if scope == "Select specific papers" and len(active["papers"]) > 1:
+                st.multiselect(
+                    "Choose papers to search",
+                    options=active["papers"],
+                    default=active["papers"],
+                    key=f"sel_{active['id']}"
+                )
+
+        # ── Clear chat ────────────────────────────────────────
         if active["messages"]:
-            if st.button("🗑️  Clear messages", use_container_width=True,
+            st.markdown("---")
+            if st.button("🗑️  Clear messages",
+                         use_container_width=True,
                          key=f"clear_{active['id']}"):
                 active["messages"] = []
                 st.rerun()
 
-# ── MAIN AREA ─────────────────────────────────────────────────
-active = get_active_session()
+        # ── Model selector ────────────────────────────────────
+        st.markdown("---")
+        st.markdown("<div class='sidebar-label'>Model</div>",
+                    unsafe_allow_html=True)
+        st.selectbox(
+            "LLM",
+            options=[
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "llama-4-scout-preview",
+                "qwen3-32b",
+            ],
+            index=0,
+            key="groq_model",
+            label_visibility="collapsed"
+        )
 
+# ── MAIN AREA ─────────────────────────────────────────────────
+active = get_active()
 if not active:
     st.stop()
 
-# Welcome screen — no messages yet
-if not active["messages"] and not active["paper"]:
+# Re-ingest papers if ChromaDB was reset
+if active["papers"]:
+    ensure_papers_ingested(active["papers"])
+
+# ── Welcome screen ────────────────────────────────────────────
+if not active["messages"] and not active["papers"]:
     st.markdown("""
-    <div style='display:flex; flex-direction:column; align-items:center;
-                justify-content:center; height:60vh; text-align:center'>
-        <div style='font-size:48px; margin-bottom:16px'>📄</div>
-        <h2 style='color:#ececec; font-weight:500; margin-bottom:8px'>
+    <div style='display:flex;flex-direction:column;align-items:center;
+                justify-content:center;height:60vh;text-align:center'>
+        <div style='font-size:48px;margin-bottom:16px'>📄</div>
+        <h2 style='color:#ececec;font-weight:500;margin-bottom:8px'>
             Research Assistant
         </h2>
-        <p style='color:#8e8ea0; font-size:15px; max-width:400px; line-height:1.6'>
-            Upload a research paper from the sidebar and ask questions.
+        <p style='color:#8e8ea0;font-size:15px;max-width:420px;line-height:1.6'>
+            Upload one or more research papers and ask questions.
             Get grounded answers with exact page citations.
         </p>
-        <div style='margin-top:24px; display:flex; gap:12px; flex-wrap:wrap;
+        <div style='margin-top:24px;display:flex;gap:10px;flex-wrap:wrap;
                     justify-content:center'>
-            <div style='background:#2f2f2f; border-radius:10px; padding:10px 16px;
-                        font-size:13px; color:#ececec'>
-                📝 Summarise the paper
+            <div style='background:#2f2f2f;border-radius:10px;
+                        padding:10px 16px;font-size:13px;color:#ececec'>
+                📝 Summarise this paper
             </div>
-            <div style='background:#2f2f2f; border-radius:10px; padding:10px 16px;
-                        font-size:13px; color:#ececec'>
-                🔍 What dataset was used?
+            <div style='background:#2f2f2f;border-radius:10px;
+                        padding:10px 16px;font-size:13px;color:#ececec'>
+                🔍 Compare methodologies
             </div>
-            <div style='background:#2f2f2f; border-radius:10px; padding:10px 16px;
-                        font-size:13px; color:#ececec'>
-                📊 What are the main findings?
+            <div style='background:#2f2f2f;border-radius:10px;
+                        padding:10px 16px;font-size:13px;color:#ececec'>
+                📊 What datasets were used?
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-elif not active["messages"] and active["paper"]:
-    st.markdown(f"""
-    <div style='display:flex; flex-direction:column; align-items:center;
-                justify-content:center; height:55vh; text-align:center'>
-        <div style='font-size:40px; margin-bottom:16px'>✅</div>
-        <h3 style='color:#ececec; font-weight:500; margin-bottom:6px'>
-            {active["paper"]} is ready
-        </h3>
-        <p style='color:#8e8ea0; font-size:14px'>
-            Ask anything about this paper below
+        <p style='color:#8e8ea0;font-size:13px;margin-top:20px'>
+            👈 Upload PDFs from the sidebar to begin
         </p>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
+
+elif not active["messages"] and active["papers"]:
+    n = len(active["papers"])
+    paper_list = ", ".join(p.replace(".pdf", "") for p in active["papers"])
+    st.markdown(f"""
+    <div style='display:flex;flex-direction:column;align-items:center;
+                justify-content:center;height:55vh;text-align:center'>
+        <div style='font-size:40px;margin-bottom:16px'>✅</div>
+        <h3 style='color:#ececec;font-weight:500;margin-bottom:6px'>
+            {n} paper{"s" if n > 1 else ""} ready
+        </h3>
+        <p style='color:#8e8ea0;font-size:14px;max-width:400px'>
+            {paper_list}
+        </p>
+        <p style='color:#8e8ea0;font-size:13px;margin-top:8px'>
+            Ask anything about {"these papers" if n > 1 else "this paper"} below
+        </p>
+    </div>""", unsafe_allow_html=True)
 
 else:
-    # Render chat messages
+    # ── Title ─────────────────────────────────────────────────
+    n = len(active["papers"])
+    if n > 1:
+        st.title(f"📚 {active['title']} ({n} papers)")
+    elif n == 1:
+        st.title(f"📄 {active['papers'][0].replace('.pdf','')}")
+    else:
+        st.title("📄 Research Assistant")
+    st.markdown("---")
+
+    # ── Chat history ──────────────────────────────────────────
     for msg in active["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -334,51 +364,65 @@ else:
                         st.markdown(f"**{s['file']}** — Page {s['page']}")
                         st.code(s["snippet"], language=None)
 
-# ── Chat input ─────────────────────────────────────────────────
-if not active["paper"]:
-    placeholder = "Upload a paper first to ask questions..."
-    disabled = False
-else:
-    placeholder = f"Ask about {active['paper']}..."
-    disabled = False
+# ── Chat input ────────────────────────────────────────────────
+# Always re-fetch active session at bottom to get latest state
+active = get_active()
+has_papers = active and len(active.get("papers", [])) > 0
 
-if user_input := st.chat_input(placeholder, disabled=disabled):
-    if not active["paper"]:
-        st.warning("Please upload a PDF first using the sidebar.")
+placeholder = (
+    f"Ask about {len(active['papers'])} paper(s)..."
+    if has_papers else "Upload a paper first..."
+)
+
+if user_input := st.chat_input(placeholder):
+    active = get_active()  # re-fetch again on submit
+    if not active or not active["papers"]:
+        st.warning("Please upload at least one PDF first.")
         st.stop()
 
     # Add user message
     active["messages"].append({"role": "user", "content": user_input})
-
-    # Update session title from first question
     if len(active["messages"]) == 1:
-        update_session_title(active["id"], user_input)
+        update_title(active["id"], user_input)
 
-    # Show user message
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Determine paper filter
-    paper_filter = None
+    # Determine which papers to search
     scope_key = f"scope_{active['id']}"
-    if scope_key in st.session_state:
-        if st.session_state[scope_key] == "This paper only":
-            paper_filter = active["paper"]
+    sel_key   = f"sel_{active['id']}"
+    scope     = st.session_state.get(scope_key, "All uploaded papers")
+
+    if scope == "Select specific papers":
+        paper_filter = st.session_state.get(sel_key, active["papers"])
+        if not paper_filter:
+            paper_filter = active["papers"]
+    else:
+        paper_filter = active["papers"]
 
     # Generate answer
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            result = query(user_input, paper_filter=paper_filter)
+        with st.spinner(f"Searching {len(paper_filter)} paper(s)..."):
+            result = query(
+                user_input,
+                paper_filter=paper_filter,
+                model=st.session_state.get("groq_model",
+                                           "llama-3.3-70b-versatile")
+            )
 
         st.markdown(result["answer"])
 
         if result["sources"]:
+            # Show which papers were cited
+            cited = list({s["file"] for s in result["sources"]})
+            if len(cited) > 1:
+                st.caption(f"Sources pulled from: {', '.join(cited)}")
+
             with st.expander("📚 View sources"):
                 for s in result["sources"]:
                     st.markdown(f"**{s['file']}** — Page {s['page']}")
                     st.code(s["snippet"], language=None)
 
-    # Save assistant message
     active["messages"].append({
         "role": "assistant",
         "content": result["answer"],
