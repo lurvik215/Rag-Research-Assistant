@@ -37,16 +37,16 @@ _llm = LLMRunner()
 _ingested_papers: set = set()
 def ingest(pdf_path: str) -> int:
     """
-    Ingests a PDF into in-memory ChromaDB.
-    Uses _ingested_papers set as source of truth.
-    Returns number of chunks stored, 0 if already done.
+    Full ingestion pipeline: PDF → chunks → vectors → ChromaDB.
+    PDFLoader.load() now returns both pages and title in one call
+    — single file read, no duplicate fitz.open().
     """
     source_file = os.path.basename(pdf_path)
 
     if source_file in _ingested_papers:
         return 0
 
-    # Delete any existing chunks for this file first (safety)
+    # Safety: delete stale chunks
     try:
         existing = _collection.get(where={"source_file": source_file})
         if existing["ids"]:
@@ -54,14 +54,32 @@ def ingest(pdf_path: str) -> int:
     except Exception:
         pass
 
-    pages = _loader.load(pdf_path)
+    # Single PDF read — returns both pages and title
+    result = _loader.load(pdf_path)
+    pages  = result["pages"]
+    title  = result["title"]
+
     if not pages:
+        print(f"No text extracted from '{source_file}'. Skipping.")
         return 0
 
+    # Store title as dedicated searchable chunk
+    if title and title != "Unknown":
+        title_chunk = {
+            "chunk_index": -1,
+            "text":        f"The title of this paper is: {title}",
+            "source_file": source_file,
+            "page_num":    1,
+            "chunk_id":    f"{source_file}_title"
+        }
+        _embedder.store([title_chunk])
+
+    # Store all content chunks
     chunks = _chunker.chunk(pages)
     stored = _embedder.store(chunks)
     _ingested_papers.add(source_file)
-    return stored
+
+    return stored + (1 if title != "Unknown" else 0)
 
 def query(question: str, paper_filter: list = None,
           model: str = None) -> dict:
@@ -75,7 +93,46 @@ def query(question: str, paper_filter: list = None,
                       "how much", "number of", "total", "all the"]
     is_counting = any(w in question.lower() for w in counting_words)
     top_k = 15 if is_counting else TOP_K
-    
+
+    # Detect title/author questions — always fetch title chunk directly
+    title_words = ["title", "name of the paper", "paper called",
+                   "what is this paper", "paper about"]
+    is_title_question = any(w in question.lower() for w in title_words)
+
+    if is_title_question and paper_filter:
+        # Directly fetch title chunks for all papers in filter
+        title_chunks = []
+        for paper in (paper_filter if isinstance(paper_filter, list)
+                      else [paper_filter]):
+            try:
+                result = _collection.get(
+                    ids=[f"{paper}_title"],
+                    include=["documents", "metadatas"]
+                )
+                if result["documents"]:
+                    title_chunks.append({
+                        "text":        result["documents"][0],
+                        "source_file": paper,
+                        "page_num":    1,
+                        "distance":    0.0   # perfect match
+                    })
+            except Exception:
+                pass
+
+        if title_chunks:
+            # Merge title chunks with semantic results
+            semantic = _retriever.retrieve(
+                question,
+                top_k=3,
+                paper_filter=paper_filter[0] if isinstance(
+                    paper_filter, list) else paper_filter
+            )
+            chunks = title_chunks + semantic
+            prompt = build_prompt(question, chunks)
+            answer = _llm.generate(prompt, model=model)
+            sources = [{"file": c["source_file"], "page": c["page_num"],
+                        "snippet": c["text"][:200]} for c in chunks]
+            return {"answer": answer, "sources": sources}
     # ── Multi-paper retrieval ─────────────────────────────────
     if paper_filter and len(paper_filter) > 0:
         all_chunks = []

@@ -273,10 +273,10 @@ with st.sidebar:
         st.selectbox(
             "LLM",
             options=[
-                "llama-3.3-70b-versatile",
+                "openai/gpt-oss-20b",
                 "llama-3.1-8b-instant",
                 "llama-4-scout-preview",
-                "qwen3-32b",
+                "meta-llama/llama-4-maverick-17b-128e-instruct",
             ],
             index=0,
             key="groq_model",
