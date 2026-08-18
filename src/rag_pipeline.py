@@ -13,6 +13,7 @@ from src.ingestion.embedder import Embedder
 from src.retrieval.retriever import Retriever
 from src.generation.llm_runner import LLMRunner
 from src.generation.prompt_builder import build_prompt
+from src.ingestion.image_extractor import ImageExtractor
 
 # ── In-memory ChromaDB — resets when app restarts ─────────────
 _chroma_client = chromadb.EphemeralClient()
@@ -32,19 +33,20 @@ _embedder = Embedder(_collection)
 _embedder.model = _embed_model          # reuse same model instance
 _retriever = Retriever(_collection, _embed_model)
 _llm = LLMRunner()
-
+_image_extractor = ImageExtractor()
 # Track ingested papers in memory
 _ingested_papers: set = set()
-def ingest(pdf_path: str) -> int:
+def ingest(pdf_path: str, extract_images: bool = True) -> dict:
     """
-    Full ingestion pipeline: PDF → chunks → vectors → ChromaDB.
-    PDFLoader.load() now returns both pages and title in one call
-    — single file read, no duplicate fitz.open().
+    Full ingestion pipeline: PDF → text chunks + image chunks → ChromaDB.
+    extract_images: if True, uses Vision LLM to describe figures.
+    Returns dict: {text_chunks, caption_chunks, image_chunks, total}
     """
     source_file = os.path.basename(pdf_path)
 
     if source_file in _ingested_papers:
-        return 0
+        return {"text_chunks": 0, "caption_chunks": 0,
+                "image_chunks": 0, "total": 0}
 
     # Safety: delete stale chunks
     try:
@@ -54,16 +56,17 @@ def ingest(pdf_path: str) -> int:
     except Exception:
         pass
 
-    # Single PDF read — returns both pages and title
+    # Single PDF read — pages + title
     result = _loader.load(pdf_path)
     pages  = result["pages"]
     title  = result["title"]
 
     if not pages:
         print(f"No text extracted from '{source_file}'. Skipping.")
-        return 0
+        return {"text_chunks": 0, "caption_chunks": 0,
+                "image_chunks": 0, "total": 0}
 
-    # Store title as dedicated searchable chunk
+    # Store title chunk
     if title and title != "Unknown":
         title_chunk = {
             "chunk_index": -1,
@@ -74,12 +77,35 @@ def ingest(pdf_path: str) -> int:
         }
         _embedder.store([title_chunk])
 
-    # Store all content chunks
-    chunks = _chunker.chunk(pages)
-    stored = _embedder.store(chunks)
+    # Store text chunks
+    chunks      = _chunker.chunk(pages)
+    text_stored = _embedder.store(chunks)
+
+    # Store figure captions
+    captions        = _image_extractor.extract_captions(pages)
+    caption_stored  = _embedder.store(captions) if captions else 0
+
+    # Store image descriptions (Vision LLM)
+    image_stored = 0
+    if extract_images:
+        print(f"Extracting image descriptions from {source_file}...")
+        image_chunks = _image_extractor.describe_page_images(
+            pdf_path, pages
+        )
+        image_stored = _embedder.store(image_chunks) if image_chunks else 0
+
     _ingested_papers.add(source_file)
 
-    return stored + (1 if title != "Unknown" else 0)
+    total = text_stored + caption_stored + image_stored + 1
+    print(f"Total: {text_stored} text + {caption_stored} captions "
+          f"+ {image_stored} image descriptions")
+
+    return {
+        "text_chunks":    text_stored,
+        "caption_chunks": caption_stored,
+        "image_chunks":   image_stored,
+        "total":          total
+    }
 
 def query(question: str, paper_filter: list = None,
           model: str = None) -> dict:

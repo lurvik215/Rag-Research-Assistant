@@ -52,31 +52,48 @@ class PDFLoader:
     def _extract_title_from_text(self, text: str) -> str:
         """
         Extracts paper title from first page text.
-        Title lines appear before author names, emails, institutions.
-        Collects minimum 2 lines before applying short-line stop
-        so multi-line titles are captured fully.
+        Handles both conference papers and journal papers.
+        Journal papers have volume/issue headers before the title.
         """
         lines = [l.strip() for l in text.split("\n")
                  if len(l.strip()) > 3]
 
         title_lines = []
-        for line in lines[:10]:
+        for line in lines[:15]:
+            # Skip standalone page numbers (pure digits)
+            if line.isdigit():
+                continue
+
+            # Skip journal/volume header lines
+            if any(word in line.upper() for word in
+                   ["TRANSACTIONS", "JOURNAL", "PROCEEDINGS",
+                    "CONFERENCE", "VOL.", "NO.", "IEEE ", "ACM ",
+                    "LETTERS", "MAGAZINE"]):
+                continue
+
             # Stop at emails
             if "@" in line:
                 break
+
             # Stop at institution keywords
             if any(word in line.lower() for word in
                    ["department", "university", "institute",
                     "college", "school", "faculty", "national",
                     "surathkal", "karnataka", "computational",
-                    "mathematical", "sciences"]):
+                    "mathematical", "sciences", "member, ieee",
+                    "student member", "senior member"]):
                 break
-            # Only apply name-pattern stop after 2+ lines collected
-            # Prevents cutting off 2-word second title lines
+
+            # Stop at abstract
+            if line.lower().startswith("abstract"):
+                break
+
+            # Only apply name-pattern stop after 2+ title lines collected
             if len(title_lines) >= 2:
                 words = line.split()
                 if len(words) <= 3 and words[0][0].isupper():
                     break
+
             title_lines.append(line)
 
         title = " ".join(title_lines).strip()

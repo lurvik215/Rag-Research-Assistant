@@ -224,7 +224,19 @@ with st.sidebar:
                         f.write(uf.getbuffer())
                     with st.status(f"Indexing {uf.name}..."):
                         n = ingest(clean_path)
-                    if n > 0:
+                    if isinstance(n, dict) and n["total"] > 0:
+                        active["papers"].append(uf.name)
+                        if len(active["papers"]) == 1:
+                            update_title(active["id"],
+                                         uf.name.replace(".pdf", ""))
+                        st.success(
+                            f"✓ {uf.name} — "
+                            f"{n['text_chunks']} text + "
+                            f"{n['caption_chunks']} captions + "
+                            f"{n['image_chunks']} image descriptions"
+                        )
+                        newly_added = True
+                    elif isinstance(n, int) and n > 0:
                         active["papers"].append(uf.name)
                         if len(active["papers"]) == 1:
                             update_title(active["id"],
@@ -274,10 +286,10 @@ with st.sidebar:
             "LLM",
             options=[
                 "openai/gpt-oss-20b",
+                "openai/gpt-oss-120b",
+                "qwen/qwen3.6-27b",
                 "llama-3.1-8b-instant",
-                "llama-4-scout-preview",
-                "meta-llama/llama-4-maverick-17b-128e-instruct",
-            ],
+                ],
             index=0,
             key="groq_model",
             label_visibility="collapsed"

@@ -22,6 +22,7 @@ def get_secret(key: str) -> str:
 # Groq LLM
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-20b"
+VISION_MODEL  = "qwen/qwen3.6-27b"   
 
 # Embedding model (runs locally, GPU-accelerated on your workstation)
 EMBED_MODEL = "all-MiniLM-L6-v2"
